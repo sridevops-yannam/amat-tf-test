@@ -1,0 +1,82 @@
+
+trigger: none
+
+pool:
+  vmImage: ubuntu-latest
+variables:
+  - group: mygroup
+
+resources:
+  repositories:
+    - repository: TF
+      endpoint: babula000
+      name: babula000/TF
+      type: github
+
+stages:
+- stage: validate
+  jobs:
+  - job: Compliance
+    displayName: 'Run Sonar'
+    pool: 
+      vmImage: 'ubuntu-latest'
+    steps:
+      - checkout: TF
+      - task: SonarCloudPrepare@1
+        inputs:
+          SonarCloud: 'Sonar-Cloud'
+          organization: 'ado-sonarcloud'
+          scannerMode: 'CLI'
+          configMode: 'manual'
+          cliProjectKey: 'adoterraform'
+          cliProjectName: 'adoterraform'
+          cliSources: '$(System.DefaultWorkingDirectory)/TF'
+      - task: Bash@3
+        inputs:
+          targetType: 'inline'
+          script: |
+              wget -qO - terraform.gpg https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/terraform-archive-keyring.gpg
+              sudo echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/terraform-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" > /etc/apt/sources.list.d/terraform.list
+              sudo apt update
+              sudo apt install terraform
+              terraform --version
+        displayName: Install Terraform
+      - bash: |
+            set -eux  # fail on error
+            az login --service-principal -u $ARM_CLIENT_ID -p $ARM_CLIENT_SECRET --tenant $ARM_TENANT_ID
+            subscriptionId=$(az account show --query id -o tsv)
+            terraform init \
+              -backend-config=storage_account_name=$(TerraformBackendStorageAccount) \
+              -backend-config=container_name=$(TerraformBackendStorageContainer) \
+              -backend-config=key=dev.tfstate \
+              -backend-config=resource_group_name=$(TerraformBackendResourceGroup) \
+              -backend-config=subscription_id="$ARM_SUBSCRIPTION_ID" \
+              -backend-config=tenant_id="$ARM_TENANT_ID" \
+              -backend-config=client_id="$ARM_CLIENT_ID" \
+              -backend-config=client_secret="$ARM_CLIENT_SECRET" 
+        displayName: 'Terraform Init'
+        workingDirectory: $(System.DefaultWorkingDirectory)/TF
+        enabled: true
+        env:
+          ARM_CLIENT_ID: $(servicePrincipalId)
+          ARM_CLIENT_SECRET: $(servicePrincipalKey)
+          ARM_TENANT_ID: $(tenantId)
+          ARM_SUBSCRIPTION_ID: $(subscriptionId)
+      
+      - bash: |
+          az login --service-principal -u $ARM_CLIENT_ID -p $ARM_CLIENT_SECRET --tenant $ARM_TENANT_ID
+          terraform plan -out=plan.tfplan -input=false
+        displayName: 'Terraform Plan'
+        workingDirectory: $(System.DefaultWorkingDirectory)/TF
+        env:
+          ARM_CLIENT_ID: $(servicePrincipalId)
+          ARM_CLIENT_SECRET: $(servicePrincipalKey)
+          ARM_TENANT_ID: $(tenantId)
+          ARM_SUBSCRIPTION_ID: $(subscriptionId)
+      - task: SonarCloudAnalyze@1
+        displayName: SonarCloud Scan
+      - task: SonarCloudPublish@1
+        displayName: SonarCloud Publish
+        inputs:
+          pollingTimeoutSec: '300'
+      
